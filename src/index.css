@@ -1,0 +1,2 @@
+:root { font-synthesis: none; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; }
+button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid #1d6b51; outline-offset: 2px; }
