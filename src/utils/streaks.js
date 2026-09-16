@@ -27,7 +27,7 @@ export function getCurrentStreak(habit, today = new Date()) {
 export function getBestStreak(habit) {
   const completions = new Set(habit.completions || [])
   if (!completions.size) return 0
-  const dates = [...completions].sort()
+  const dates = [...completions].filter((key) => isHabitScheduledOnDate(habit, fromDateKey(key))).sort()
   let best = 0
   let streak = 0
   let previousScheduledKey = null

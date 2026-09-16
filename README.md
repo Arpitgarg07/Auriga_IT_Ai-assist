@@ -15,6 +15,10 @@ The challenge describes a growing collection of habits with different schedules,
 - Search across active and archived habits
 - Archive and unarchive without deleting history
 - Persisted 75-day challenge day and progress
+- Historical day picker using actual stored completion dates
+- Milestone celebrations for first completion through 75-day streaks
+- Rewards with streak thresholds, locked/unlocked states, and claiming
+- 7-day and 30-day analytics with completion rates, misses, habit rates, and activity heatmap
 - Seed habits on first launch only
 - Responsive layout, accessible labels, disabled invalid submit, confirmation before archive, and empty states
 
@@ -57,7 +61,7 @@ src/
 
 ## Persistence
 
-Habits are stored under `habit-tracker-habits` and challenge settings under `habit-tracker-settings`. The first load creates four sample habits and stores the current date as the challenge start date. Later loads use existing data and never reseed over it. Invalid or unreadable JSON safely falls back to the seed data. Browser storage can be cleared through DevTools to reset the demo.
+Habits are stored under `habit-tracker-habits` and challenge settings, achievements, and rewards under `habit-tracker-settings`. The first load creates four sample habits and stores the current date as the challenge start date. Later loads use existing data and never reseed over it. Invalid or unreadable JSON safely falls back to the seed data. Browser storage can be cleared through DevTools to reset the demo.
 
 ## Streak Behavior
 
@@ -74,4 +78,4 @@ Challenge progress is based on the persisted local start date: day 1 is the star
 
 ## Future Improvements
 
-A larger version could add a challenge start-date editor, a completion history calendar, configurable schedules, import/export, automated unit tests for date boundaries, and a service worker for stronger offline asset caching.
+A larger version could add a challenge start-date editor, configurable schedules, import/export, automated unit tests for date boundaries, richer all-time analytics, and a service worker for stronger offline asset caching.

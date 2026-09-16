@@ -17,18 +17,31 @@ const seedHabits = [
   completions: [],
 }))
 
+function validHabit(habit) {
+  return habit && typeof habit === 'object' && typeof habit.id === 'string' && typeof habit.name === 'string'
+    && (habit.frequency === 'daily' || habit.frequency === 'weekdays') && Array.isArray(habit.completions)
+}
+
+function validSettings(settings, today) {
+  if (!settings || typeof settings.challengeStart !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(settings.challengeStart)) {
+    return { challengeStart: today, achievements: [], rewards: [] }
+  }
+  return {
+    ...settings,
+    achievements: Array.isArray(settings.achievements) ? settings.achievements : [],
+    rewards: Array.isArray(settings.rewards) ? settings.rewards : [],
+  }
+}
+
 export function loadData(today) {
   try {
     const savedHabits = localStorage.getItem(HABITS_KEY)
     const savedSettings = localStorage.getItem(SETTINGS_KEY)
     const habits = savedHabits ? JSON.parse(savedHabits) : seedHabits
-    const settings = savedSettings ? JSON.parse(savedSettings) : { challengeStart: today }
-    return {
-      habits: Array.isArray(habits) ? habits : seedHabits,
-      settings: settings && typeof settings === 'object' ? settings : { challengeStart: today },
-    }
+    const settings = savedSettings ? JSON.parse(savedSettings) : { challengeStart: today, achievements: [], rewards: [] }
+    return { habits: Array.isArray(habits) && habits.every(validHabit) ? habits : seedHabits, settings: validSettings(settings, today) }
   } catch {
-    return { habits: seedHabits, settings: { challengeStart: today } }
+    return { habits: seedHabits, settings: { challengeStart: today, achievements: [], rewards: [] } }
   }
 }
 
