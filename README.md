@@ -21,10 +21,12 @@ The challenge describes a growing collection of habits with different schedules,
 - 7-day and 30-day analytics with completion rates, misses, habit rates, and activity heatmap
 - Seed habits on first launch only
 - Responsive layout, accessible labels, disabled invalid submit, confirmation before archive, and empty states
+- State-based Home, Analytics, Manage, and Settings navigation with responsive sidebar/mobile navigation
+- Custom weekday scheduling and a disconnected Google Health integration state
 
 ## Tech Stack
 
-React 19, Vite, JavaScript, CSS, `lucide-react` icons, ESLint, and browser `localStorage`. There is no backend, authentication, external API, or server-side dependency.
+React 19, Vite, JavaScript, CSS, `lucide-react` icons, ESLint, browser `localStorage`, and an optional Express/Mongoose server scaffold. The frontend runs without backend credentials.
 
 ## Setup and Running Locally
 
@@ -57,6 +59,12 @@ src/
     dates.js          Local calendar date helpers
     streaks.js        Schedule-aware streak calculations
     storage.js        Safe localStorage loading and saving
+server/
+  src/config/         Environment configuration
+  src/middleware/     Authentication boundary placeholder
+  src/models/         MongoDB-ready data schemas
+  src/services/       Google Health integration boundary
+  src/server.js       Optional Express API
 ```
 
 ## Persistence

@@ -19,7 +19,7 @@ const seedHabits = [
 
 function validHabit(habit) {
   return habit && typeof habit === 'object' && typeof habit.id === 'string' && typeof habit.name === 'string'
-    && (habit.frequency === 'daily' || habit.frequency === 'weekdays') && Array.isArray(habit.completions)
+    && ['daily', 'weekdays', 'custom'].includes(habit.frequency) && Array.isArray(habit.completions)
 }
 
 function validSettings(settings, today) {

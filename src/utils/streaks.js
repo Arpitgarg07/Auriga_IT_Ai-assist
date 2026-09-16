@@ -2,6 +2,7 @@ import { addDays, fromDateKey, toDateKey } from './dates.js'
 
 export function isHabitScheduledOnDate(habit, date) {
   if (habit.frequency === 'daily') return true
+  if (habit.frequency === 'custom') return habit.customDays?.includes(fromDateKey(toDateKey(date)).getDay() || 7)
   return fromDateKey(toDateKey(date)).getDay() >= 1 && fromDateKey(toDateKey(date)).getDay() <= 5
 }
 
