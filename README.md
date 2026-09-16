@@ -93,6 +93,13 @@ The two most load-bearing assumptions: a day is the user's **local calendar day*
 - Derived states: Locked, Unlocked, Claimed
 - Progress bar toward each threshold
 
+**Accounts**
+- Google sign-in, or a developer sign-in for local work when Google credentials are not configured
+- Habits, completion history, rewards, achievements and the challenge stored in MongoDB and available on any device
+- "Import your existing data" copies browser-local habits and history into a new account, and never deletes the local copy
+- Your progress is private to your account — the API derives who you are from your session and never from anything the browser sends
+- The app works fully without an account: with no backend it says so and keeps using local storage
+
 **Settings**
 - Profile: display name and email (used by the greeting)
 - Challenge: start date, "start today", reset
@@ -255,14 +262,11 @@ Two modes, chosen at runtime by whether a backend is reachable and whether the u
 
 The server never has its own copy of the streak or reminder maths. `server/src/services/reminderService.js` imports `pendingWithStreaks` from the same `src/utils/reminders.js` the browser uses, which in turn imports the untouched `streaks.js`. There is exactly one implementation of "which habits are still outstanding today".
 
-**Accounts and sync**
-- Google sign-in (OAuth 2.0), with a developer sign-in for local work when Google credentials are not configured
-- Signed, httpOnly session cookies — no token is ever stored in JavaScript
-- Habits, completion history, rewards, achievements and the challenge live in MongoDB once you sign in
-- Every query is scoped to the session user; the API never accepts a `userId` from the client
-- One idempotent sync endpoint carries both the ongoing writes and the one-off import
-- "Import your existing data" offers to copy browser-local habits and history into a new account, and never deletes the local copy
-- The app works fully without any of this: with no backend it says so and keeps using local storage
+Three architectural consequences worth stating:
+
+- **Identity comes only from the session.** There is no `userId` parameter anywhere in the API. `attachUser` resolves a signed httpOnly cookie into `request.user` and every handler scopes by that; ownership is re-checked on the specific row for any id arriving in a URL.
+- **The server has no separate data shapes.** Habits and rewards come back through `server/src/services/habitMapper.js` in exactly the form the components already expect, so no component knows whether it is reading from `localStorage` or MongoDB.
+- **`app.js` builds the app with no side effects** — no port, no connection — which is what lets the test suite construct it against a database of its own choosing.
 
 ### Sign-in flow
 
