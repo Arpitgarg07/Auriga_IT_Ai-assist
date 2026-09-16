@@ -26,45 +26,64 @@ The most important interpretation: **the story never asks for a specific person'
 - A day is the user's **local calendar day**, not a UTC timestamp. Date keys are `YYYY-MM-DD` strings built from local `getFullYear/getMonth/getDate`.
 - **Weekday means Monday–Friday.** Saturday and Sunday are *unscheduled* for weekday habits, not failures.
 - Missing a **scheduled** day breaks a streak. Skipping an unscheduled day does not.
-- The challenge is 75 days and starts on the date the user sets. With no explicit start, first launch stamps today.
-- One local profile per browser. There is no account system in this build.
+- The challenge is 75 days and starts on the date the user sets. With no explicit start, first launch or first sign-in stamps today.
+- There are two data modes, and the app must work in both: **signed out**, where one browser holds everything in `localStorage`, and **signed in**, where the account holds it in MongoDB. Neither may break the other.
 - A habit cannot miss days before it existed, so history windows are floored at `max(period start, habit.createdAt)`.
+- The user's email is owned by the sign-in provider and is therefore read-only in the app; it is the account key, not a profile field.
 
 ## Architecture
 
-React 19 + Vite, plain JavaScript, no state library and no UI kit. The dependency list is deliberately tiny: `react`, `react-dom`, `lucide-react` for icons, and an **optional** Express/Mongoose server that the frontend never requires.
+React 19 + Vite, plain JavaScript, no state library and no UI kit. The frontend's runtime dependencies are `react`, `react-dom` and `lucide-react`; the server adds Express, Mongoose, dotenv, cors and nodemailer. No auth, session or charting library was added — the charts are CSS and the session tokens are built on `node:crypto`.
 
 ```
 src/
-  App.jsx                  shell: state, tab routing, celebrations, persistence
-  App.css                  design tokens, layout, components, responsive rules
-  index.css                global reset, focus treatment, colour scheme
+  App.jsx                  shell: state, tab routing, account mode, celebrations
   components/
+    LoginScreen.jsx        signed-out screen (Google / developer / continue locally)
     HomeView.jsx           greeting, today's board, streaks, badges, next reward
     AnalyticsView.jsx      filters, charts, date strip, habit table, insights
     ManageView.jsx         add/edit/archive/restore, search, filter, sort, history
-    SettingsView.jsx       profile, challenge, preferences, rewards, integrations
+    SettingsView.jsx       profile, challenge, preferences, reminders, rewards, account
     HabitCard.jsx          one habit row, reused across Home and Manage
     HabitForm.jsx          create/edit modal with icon and schedule pickers
-    RewardForm.jsx         create/edit reward modal
-    RewardsPanel.jsx       reward ledger with locked/unlocked/claimed states
+    RewardForm.jsx / RewardsPanel.jsx
     Celebration.jsx        overlay for day-complete and milestone moments
+    MorningReminder.jsx / ReminderCard.jsx
+    EmailPreview.jsx       renders the real email template in-app
     DayChips.jsx           read-only Mon–Sun schedule strip
     HabitIcon.jsx          name → icon resolution with a safe fallback
-  utils/
+  services/
+    api.js                 the only place fetch() is called
+  utils/                   pure logic, shared with the server
     dates.js               local date keys and arithmetic
-    streaks.js             schedule-aware streak engine (unchanged from MVP)
-    storage.js             localStorage read/write/validate/clear
+    streaks.js             schedule-aware streak engine (unchanged since the MVP)
+    reminders.js           pending detection, reminder copy, once-a-day rules
     analytics.js           period stats, per-habit reports, insights
+    storage.js             localStorage read/write/validate/clear
     constants.js           weekdays, milestones, schedule vocabulary
     motivation.js          time-based greeting and message rotation
 server/
-  src/models/              Mongoose schemas mirroring the client data model
-  src/services/            Google Health boundary
-  src/server.js            optional API (health, auth stub, fitness status)
+  dev-server.js            zero-config demo API on an in-memory MongoDB
+  src/app.js               builds the app without binding a port or connecting
+  src/server.js            process entry: connect, listen, schedule
+  src/config/              env.js, database.js
+  src/middleware/          auth.js (session → request.user), requireDatabase.js
+  src/models/              User, Habit, HabitCompletion, Challenge, Reward,
+                           Achievement, ReminderLog
+  src/services/            sessionService, habitMapper, emailService,
+                           reminderService, googleHealthService
+  src/jobs/                reminderScheduler
+  src/routes/              auth, sync, habits, completions, rewards,
+                           achievements, challenge, analytics, reminders
 ```
 
-The reason for splitting the single-file MVP into components is reuse: `HabitCard` and `DayChips` are now rendered by two different tabs, and the four views each have genuinely different state. The data model and the streak engine were left exactly as they were.
+Two structural decisions worth naming.
+
+The **`src/utils/` modules are shared, not duplicated.** The server imports `streaks.js`, `reminders.js`, `analytics.js` and `dates.js` directly. Those modules are pure and browser-free, so the same code that renders the dashboard also computes what the reminder email says and what `/api/analytics` returns. This is why there is no second streak implementation to drift.
+
+**`app.js` is separate from `server.js`.** Building the Express app has no side effects — no port, no connection — which is what lets the integration suite construct it, point it at a database it chose, and drive it over real HTTP.
+
+The reason for splitting the single-file MVP into components is reuse: `HabitCard` and `DayChips` are rendered by two different tabs, and the four views each have genuinely different state. The data model and the streak engine were left exactly as they were.
 
 ## Data Model
 
@@ -89,14 +108,20 @@ Challenge, achievements, rewards, profile and preferences share `habit-tracker-s
   rewards: [{ id, name, description, milestone, claimed }],
   profile: { name, email },
   preferences: { motivationalMessages, celebrationEffects, theme },
-  reminders: { enabled, time, browserNotifications, lastShownDate }
+  reminders: {
+    enabled, time, browserNotifications, lastShownDate,   // in-app
+    emailEnabled, emailTime                               // email (opt-in)
+  }
 }
 ```
 
-Two deliberate choices:
+A third key, `habit-tracker-reminder-log`, holds one date key: the last day a browser notification was raised. It is deliberately outside React state and outside the settings object, because it records an external side effect rather than anything the UI renders.
+
+Three deliberate choices:
 
 1. **Completions live on the habit**, as an array of date keys. It keeps a habit self-contained for streak maths and makes the persisted JSON human-readable.
 2. **Sunday is `7`, not `0`.** `Date#getDay()` returns `0` for Sunday, which would make a 1-based "which days are selected" UI confusing. `customDays` is normalised to 1-based at the boundary.
+3. **This is the client's model.** Once signed in, the same shapes come back from the API, presented by `server/src/services/habitMapper.js` so the components never learn the difference. Two fields differ in storage and are reconciled at that boundary, both explained in the Authentication section below: schedules are stored as day names, and a reward's `title` is presented as `name`.
 
 ## The Streak Algorithm (unchanged, and why)
 
@@ -166,14 +191,14 @@ The in-app reminder only works when the app is open. An email reminder has to wo
 
 **Why the sending is server-side.** Two reasons, and only one of them is about secrecy. An SMTP password shipped to a browser is visible to anyone who opens devtools, so credentials must stay on the server. But more fundamentally, a page that is closed cannot send anything — a reminder that only fires while the tab is open is not an email reminder at all. So the render and the send both live on the server, behind `server/src/services/emailService.js`, with the provider isolated to a single `createTransport` function so swapping SMTP for a transactional API means rewriting one function.
 
-**The data-ownership problem, and how it is resolved.** This is the honest tension in the feature. The job is specified to "identify the user, get all active habits, and check which are scheduled for today" — but at the time of writing there is no account system (Google OAuth is a stub, `attachUser` returns null, every data route answers 401) and the React app keeps everything in `localStorage`. A scheduler has nothing to read.
+**The data-ownership problem, and how it is resolved.** This was the honest tension in the feature. The job is specified to "identify the user, get all active habits, and check which are scheduled for today" — but when the email work was done there was no account system yet (no sign-in, `attachUser` returned null, every data route answered 401) and the React app kept everything in `localStorage`. A scheduler had nothing to read. Accounts were added afterwards, so the constraint has since lifted, but the shape it forced is still the right one.
 
-Rather than invent an account layer that would not work, the server was given two ways to obtain the same data, both feeding one computation:
+Rather than invent an account layer that would not work at the time, the server was given two ways to obtain the same data, both feeding one computation:
 
-- **From MongoDB** — the real deployment. `loadHabitsForUser` joins `Habit` and `HabitCompletion` back into the plain habit shape and hands it to the shared logic. This is the path the scheduled job takes once accounts exist.
-- **From a client snapshot** — the demo path. The browser posts its own habits to `/api/reminders/preview` or `/test`, and the server runs exactly the same computation over them.
+- **From MongoDB** — the real path, and now the only one the scheduled job uses. `loadHabitsForUser` joins `Habit` and `HabitCompletion` and maps them through `presentHabit` into the plain habit shape the shared logic expects.
+- **From a client snapshot** — the browser posts its own habits to `/api/reminders/preview` or `/test`, and the server runs exactly the same computation over them.
 
-The second path is not a mock. It uses the real template, the real exclusion rules and the real streak engine; it simply skips the database. That is what makes the feature demonstrable today — with no account, no MongoDB and no SMTP credentials — and it is what the assessment's "safe development/testing mechanism" clause is for.
+The second path is not a mock. It uses the real template, the real exclusion rules and the real streak engine; it simply skips the database. It is what made the feature demonstrable before accounts existed, and it remains useful: it is how the Settings panel offers a preview with no credentials and no database at all.
 
 **One source of truth, literally.** The brief says not to duplicate the streak logic and to use the same source of truth as the dashboard. The strongest available answer is that the server does not have its own copy at all: `reminderService.js` imports `pendingWithStreaks`, `streakAtRisk` and `getTodaysHabits` from `src/utils/reminders.js`, which in turn imports the untouched `streaks.js`. There is exactly one implementation of "which habits are still outstanding today", and it is the one the dashboard renders. The email cannot disagree with the app, because it is running the same function.
 
@@ -248,34 +273,50 @@ An intentional limit: the "All time" completion count is a count of check-offs, 
 
 ## Trade-offs
 
-- **localStorage over a backend.** The app must work offline and with no credentials, and a working product beats an untestable API. The Express/Mongoose layer now has real routes, validation and models for habits, completions, rewards, challenge and achievements — but it is deliberately **not** wired into the UI: nothing in `src/` depends on it. The Google Health panel reports "Not connected" honestly and the app is fully functional without it.
-- **Secrets stay out of the repository.** `.env` was not gitignored when this session began, which would have allowed a real connection string to be committed. It is now ignored, and only `.env.example` (placeholders) is tracked. No credential was fabricated at any point.
-- **Auth is a stub, and says so.** `attachUser` sets `request.user` to null, so every data route answers `401`. A dev-only `DEVELOPMENT_USER_EMAIL` flag exists for local API work, gated on `NODE_ENV !== 'production'`. This is a documented boundary, not fake authentication.
-- **One very large analytics module.** `analytics.js` is pure functions over plain data, which made it testable in isolation from React, but it is the densest file in the project.
-- **Derived rather than stored reward state.** Recomputing on render is simpler and cannot drift, at the cost of a `getBestStreak` call per habit per render. Habit counts here are small enough that this is not a bottleneck.
+- **Two data modes rather than one.** Moving to accounts could have meant replacing `localStorage` outright. That would have made the app unusable the moment the backend was down or unconfigured, and would have deleted data people already had. Instead the browser remains a complete, honest mode of operation and the account is an additive one. The cost is that persistence dispatches on mode, and the local copy keeps being written as a cache while signed in — a little redundant, and worth it for never showing a blank screen or losing work.
+- **Sessions on `node:crypto` rather than a JWT library.** Roughly forty lines, no dependency, and every part that matters (algorithm pinned, timing-safe compare, expiry enforced server-side) is small enough to audit and is covered by tests. The cost is no support for other algorithms, key rotation or revocation — none of which this app needs, and all of which would be the first thing to reach for a library for in production.
+- **Developer sign-in exists.** It is a real account creation path, gated on `NODE_ENV !== 'production'` and switchable off in development. Without it, the entire account layer would be undemonstrable wherever Google credentials are absent, which is exactly the situation this build was developed in. It is disclosed on the login screen rather than hidden.
+- **Whole-account sync rather than deltas.** `POST /api/sync` upserts everything keyed on the client id the browser already assigned, which makes both the import and the ongoing writes idempotent and very hard to get wrong. The cost is that two devices editing concurrently resolve last-writer-wins; a per-entity merge protocol is the natural next step and is listed as a limitation.
+- **Secrets stay out of the repository.** `.env` was not gitignored when this work began, which would have allowed a real connection string to be committed. It is now ignored, only `.env.example` (placeholders, verified blank) is tracked, and a test scans the routes, models and env module for anything resembling a credential.
+- **One very large analytics module.** `analytics.js` is pure functions over plain data, which made it testable in isolation from React and reusable by the server, but it is the densest file in the project.
+- **Derived rather than stored state, almost everywhere.** Reward lock state, challenge day, analytics and the reminder are all recomputed from stored completions rather than persisted. Simpler, and they cannot drift — at the cost of recomputation per render, which is not a bottleneck at these sizes.
 - **Insights are descriptive, not predictive.** They report what the data says. No forecast is shown, because a 75-day challenge rarely has enough history for one to be honest.
 - **Theme is a real light/dark switch, driven by CSS custom properties**, rather than a large theming system. Components that were styled before tokens existed were converted where they mattered.
 
 ## Verification
 
-Everything below was actually executed, not assumed:
+Everything below was actually executed, not assumed. Final state: **167 tests passing, lint clean, build succeeding.**
 
-**Frontend**
+**Static and unit**
 
 - `npm install` — dependencies were missing on handoff
 - `npm run lint` — clean, 0 errors and 0 warnings
-- `npm run build` — success, ~314 kB JS / ~96 kB gzip
-- `npm test` — **92 tests, 92 passing** on Node's built-in runner (no test framework added)
-- Headless-browser render check — all four views mount, `data-tab` switches correctly, and a scripted click-through confirmed the completion loop: milestone celebration with confetti, then the day-complete celebration, the banner, the gold ring, and that unchecking does not revoke an earned milestone
-- Headless-browser check of the email UI — the Settings card renders its toggle, time and address inputs; with email unconfigured it shows "Email service isn't configured yet" naming the exact missing variables and disables the send button; the preview modal opens and receives 7,527 bytes of rendered email HTML in a sandboxed frame
+- `npm run build` — success, ~325 kB JS / ~99 kB gzip
+- `npm test` — **167 tests, 167 passing** on Node's built-in runner. No test framework was added; `mongodb-memory-server` is the only test-only dependency, and it exists so the API can be tested against a real database
 
-**Backend**
+**The API against a real database** (`tests/api.integration.test.js`, 34 tests over real HTTP with real session cookies)
 
-- The API boots with no MongoDB and no SMTP: it logs exactly which variables are missing, keeps the scheduler idle, and serves `/api/health`
-- `POST /api/reminders/preview` verified against the running server with a snapshot exercising every exclusion rule: a completed habit, an archived habit and a weekend-only custom habit were all excluded, leaving exactly the three pending ones; the all-complete case returned `skipped: true`
-- A weekday habit with 14 calendar days of completions correctly reported a **10**-day streak, because weekends are not scheduled days — the engine's weekend rule showing up in the email
-- Guarded endpoints verified in all three states: `/test` and `/run` return 404 in production without a token, 403 with a wrong or absent token when one is configured, and reach the handler with the correct token
-- Email failure verified against a **real refused socket**, not a mock: with complete but unreachable SMTP settings, the send returned `{ sent: false }` in 290 ms with the email still rendered, nothing thrown, and the error logged server-side. This is now a permanent test that spawns a child process against an unreachable port
+- The server boots and serves `/api/health` even with no database configured, reporting exactly which variables are missing
+- Developer sign-in issues a session that `/api/me` resolves; signing out invalidates it; a forged payload, a token signed with the wrong secret, and `alg: none` are all rejected
+- Every protected route returns 401 anonymously
+- **User isolation**: one user cannot see, read, edit, archive or delete another's habit, cannot attach a completion to it, and cannot claim or delete another's reward — all by id, and the rows are asserted unchanged afterwards. Analytics are scoped to one user
+- Habit CRUD, completion idempotence and persistence with `completedAt`, reward claiming with `claimedAt`, achievement uniqueness, and derived challenge progress
+- The reminder job reads pending habits **from the database**: a completed habit, an archived habit and a weekday habit on a Saturday are all excluded, and a Mon/Wed custom habit is due Monday but not Tuesday — which is what proved the `scheduledDays` → `customDays` mapping works, after finding it broken
+- Duplicate reminders are prevented by the unique index, including two concurrent claims; a failed send is recorded as `failed`, not `sent`, and can be retried
+- No response body contains a secret
+
+**In a real browser**
+
+- All four views mount, `data-tab` switches correctly, and a scripted click-through confirmed the completion loop: milestone celebration with confetti, then the day-complete celebration, the banner, the gold ring, and that unchecking does not revoke an earned milestone
+- The Settings email card renders its controls, reports "Email service isn't configured yet" naming the exact missing variables when unconfigured, disables the send button, and the preview modal receives 7,527 bytes of rendered email HTML in a sandboxed frame
+- **The signed-in flow end to end**, against a real MongoDB: the login screen rendered with Google, developer and local options and the app shell genuinely absent behind it; developer sign-in produced the app with the real account name and email in both the sidebar and the Settings account card; the "Import your existing data?" banner recognized four browser-local habits in an empty account; importing them produced four habit cards and a reminder listing the same four; and reading the account back over the API confirmed the habits, a completion round trip with `completedAt`, and derived analytics (25% from one completion across four habits) had all persisted server-side
+
+**Email rendering and failure**
+
+- `POST /api/reminders/preview` exercised every exclusion rule: a completed habit, an archived habit and a weekend-only custom habit were all excluded, leaving exactly the three pending ones; the all-complete case returned `skipped: true`
+- A weekday habit with 14 calendar days of completions correctly reported a **10**-day streak — the engine's weekend rule showing up in the email
+- The guarded endpoints behave in all three states: 404 in production without a token, 403 with a wrong or absent token when one is configured, and reaching the handler with the correct token
+- Email failure verified against a **real refused socket**, not a mock: with complete but unreachable SMTP settings the send returned `{ sent: false }` in 290 ms with the email still rendered, nothing thrown, and the error logged server-side. This is a permanent test that spawns a child process against an unreachable port
 
 **Bugs this verification caught**, all fixed:
 
@@ -283,13 +324,18 @@ Everything below was actually executed, not assumed:
 2. `greetingFor` had an unreachable night branch: midnight–04:59 fell into "Good morning". That is exactly when the morning panel can appear on a day rollover.
 3. `motivation.js` shipped a line reading *"Your N-day streak is on the line"* fed by the **app-wide maximum** streak rather than a pending habit's own — the precise misleading pattern the brief forbids. Found by an adversarial review agent; the call site now passes the at-risk streak and the contract is documented and tested.
 4. `sendEmail` had no timeouts, so a dead SMTP host would hang a request for nodemailer's two-minute default.
+5. `loadHabitsForUser` still read the old `customDays` column after the schema moved to `scheduledDays`, which would have silently made every custom-scheduled habit never come due. It now goes through the same mapper the API uses, and a test asserts the round trip.
+6. `GET /api/me` was mounted under `/api/auth`, so the endpoint the client calls on load did not exist.
+7. `challenge.js` read `request.user._id` with no auth guard — it would have thrown on an anonymous request.
+8. The account-hydration guard was a bare boolean, which stayed true across a sign-out and sign-in and could have pushed one account's habits into another. It is now derived from the hydrated user id.
 
 Known limitations, stated plainly:
 
-- The Express server has never been run against a live MongoDB Atlas cluster, because no URI exists in this repository and none was fabricated. Its routes are a documented boundary, not a verified deployment.
-- The scheduled email job therefore cannot be observed end to end against real users: it needs accounts to iterate. `/api/reminders/preview` and `/test` exercise the identical pipeline from a habit snapshot instead, which is what was verified.
-- No email has been delivered to a real inbox from this environment, because no SMTP credentials exist here. Everything up to and including the SMTP connection was verified; actual delivery was not.
-- Google OAuth and the Google Health API are not implemented. The UI reports the disconnected state truthfully.
-- Browser notifications only fire while the app is open in a tab; there is no push server or service worker, and the UI says so.
-- Per-user timezone scheduling is not implemented; one server-wide zone is used.
-- UI behaviour is verified by scripted browser checks, not by a component test framework.
+- **Google sign-in has never completed a round trip to Google from this environment.** Credentials now exist in `.env`, but the exchange itself is untested here — the state check, the session issue and everything downstream are covered.
+- **No email has been delivered to a real inbox from here.** Everything up to and including the SMTP connection is tested; delivery is not.
+- **The database used for testing is a local `mongod`, not Atlas.** The integration suite starts a real one via `mongodb-memory-server`; no Atlas cluster has been contacted.
+- **Google Health is not implemented.** The UI reports the disconnected state truthfully.
+- **Browser notifications only fire while the app is open in a tab**; there is no push server or service worker, and the UI says so.
+- **Per-user timezone scheduling is not implemented**; one server-wide zone drives the job.
+- **Sync replaces rather than merges**, so two devices editing one account concurrently would have the last writer win.
+- **UI behaviour is verified by scripted browser checks**, not by a component test framework.

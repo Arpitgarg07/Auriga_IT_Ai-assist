@@ -6,6 +6,8 @@ Open it in the morning, see only what is due today, tick habits off one by one, 
 
 Built for any user — no name, habit or streak is hard-coded.
 
+It runs in two modes. Signed out, everything lives in the browser and needs no server at all. Signed in with Google, your habits, history, rewards and streaks live in MongoDB and follow you to any device — and only then can the morning email reminder reach you when the app is closed.
+
 ---
 
 ## Problem Interpretation
@@ -121,7 +123,7 @@ npm run preview   # serve the built bundle
 
 ### Tests
 
-`npm test` runs the unit suite on Node's built-in test runner — no test framework is installed. It covers the areas where a silent mistake would be invisible in the UI:
+`npm test` runs everything on Node's built-in test runner — no test framework is installed. It covers the areas where a silent mistake would be invisible in the UI:
 
 | File | Covers |
 | --- | --- |
@@ -159,15 +161,18 @@ npm run dev         # frontend on :5173
 
 The real API against a real (throwaway) MongoDB — nothing is mocked, and no configuration is needed. Sign in with **Continue as developer**; the data is discarded when the process exits. The `mongod` binary is downloaded on first run.
 
-### Optional API server
+### What each mode gives you
 
-A small Express + Mongoose boundary lives in `server/`. It is **not required** and the UI does not depend on it. To run it:
+| | Signed out, no backend | Signed in |
+| --- | --- | --- |
+| Works at all | ✅ | ✅ |
+| Habits, history, streaks | ✅ in this browser | ✅ on the server |
+| Sync across devices | ✗ | ✅ |
+| Morning reminder panel | ✅ | ✅ |
+| Email reminders | ✗ (needs an account) | ✅ if SMTP is configured |
+| Survives clearing site data | ✗ | ✅ |
 
-```bash
-npm run server    # listens on PORT (default 4000)
-```
-
-In development, Vite proxies `/api` to `http://localhost:4000`, so the frontend can reach it without any hard-coded host. If the server is not running the request simply fails and the app continues on local storage.
+Vite proxies `/api` to `http://localhost:4000`, so the frontend needs no hard-coded host. If the server is not running the request fails, the login screen says **Backend not reachable**, and the app continues on local storage.
 
 ---
 
@@ -226,17 +231,29 @@ For local testing without a real inbox, run [Mailpit](https://github.com/axllent
 
 ## Architecture
 
-```
-React (Vite)  →  browser localStorage          ← what actually runs today
-Express API   →  MongoDB Atlas                 ← optional boundary, not wired in
-Express       →  Google OAuth → Google Health  ← boundary only, not implemented
+Two modes, chosen at runtime by whether a backend is reachable and whether the user signs in.
 
-Reminder job (scheduler) ─┬→ MongoDB  (users, habits, completions)
-                          ├→ src/utils/reminders.js  ← the same module the dashboard uses
-                          └→ SMTP  (nodemailer)      ← credentials stay server-side
+```text
+ Signed out  (or no backend)
+ React (Vite)  →  browser localStorage            ← always works, no server needed
 
-POST /api/reminders/preview ─→ habit snapshot from the browser ─→ same renderer, no DB, no SMTP
+ Signed in
+ React (Vite)  →  Express API  →  MongoDB         ← accounts, history, multi-device
+                     │
+                     ├→ Google OAuth (sign-in)
+                     ├→ SMTP / nodemailer (email reminders)   ← credentials stay server-side
+                     └→ the reminder job
+
+ The shared logic both sides run
+ src/utils/streaks.js, reminders.js, analytics.js, dates.js
+   ├── imported by the React app
+   └── imported by the server        ← so the email cannot disagree with the dashboard
+
+ Not implemented
+ Express  →  Google Health (steps, distance, calories)    ← reports "not connected" honestly
 ```
+
+The server never has its own copy of the streak or reminder maths. `server/src/services/reminderService.js` imports `pendingWithStreaks` from the same `src/utils/reminders.js` the browser uses, which in turn imports the untouched `streaks.js`. There is exactly one implementation of "which habits are still outstanding today".
 
 **Accounts and sync**
 - Google sign-in (OAuth 2.0), with a developer sign-in for local work when Google credentials are not configured
@@ -289,21 +306,22 @@ scheduler tick (every REMINDER_POLL_MINUTES)
 
 **Frontend** — React 19, plain JavaScript, hand-written CSS. No state library, no UI kit, no chart library (all charts are CSS). The only runtime dependencies are `react`, `react-dom` and `lucide-react`.
 
-**Server** — Express 5 + Mongoose. Contains schemas mirroring the client data model and a Google Health service boundary that reports the disconnected state honestly.
+**Server** — Express 5 + Mongoose. Owns sessions, the account data, the reminder job and the only SMTP code.
 
 ### Frontend structure
 
 ```text
 src/
-  App.jsx                  app shell: state, tab routing, celebrations, persistence
+  App.jsx                  app shell: state, tab routing, account mode, celebrations
   App.css                  design tokens, layout, components, responsive rules
   index.css                global reset, focus treatment, colour scheme
   main.jsx                 React entry point
   components/
+    LoginScreen.jsx        signed-out screen: Google, developer, or continue locally
     HomeView.jsx           greeting, today's board, stats, badges, next reward
     AnalyticsView.jsx      filters, charts, date strip, habit table, insights
     ManageView.jsx         add/edit/archive/restore, search, filter, sort, history
-    SettingsView.jsx       profile, challenge, preferences, rewards, integrations
+    SettingsView.jsx       profile, challenge, preferences, reminders, rewards, account
     HabitCard.jsx          single habit row (shared by Home and Manage)
     HabitForm.jsx          create/edit modal with icon and schedule pickers
     RewardForm.jsx         create/edit reward modal
@@ -314,29 +332,67 @@ src/
     EmailPreview.jsx       renders the real email template in-app, no credentials
     DayChips.jsx           read-only Mon–Sun schedule strip
     HabitIcon.jsx          icon-name resolution with a safe fallback
+  services/
+    api.js                 the only place fetch() is called
   utils/
     dates.js               local date keys and date arithmetic
     streaks.js             schedule-aware streak engine
     storage.js             localStorage load/save/validate/clear
     analytics.js           period stats, per-habit reports, insights
     reminders.js           pending-habit detection, reminder copy, once-a-day rules
-    reminderApi.js         client for the email-reminder endpoints
     constants.js           weekdays, milestones, schedule vocabulary
     motivation.js          time-based greeting and message rotation
-tests/                     node:test unit suite (npm test)
+tests/                     node:test suite — unit and real-HTTP integration
 server/
-  src/config/env.js        environment loading
-  src/middleware/auth.js   authentication boundary (currently a stub)
-  src/middleware/requireDatabase.js
+  dev-server.js            zero-config demo API on an in-memory MongoDB
+  src/app.js               builds the Express app (no port, no connection)
+  src/server.js            process entry point: connect, listen, schedule
+  src/config/
+    env.js                 environment loading
+    database.js            connection and honest status reporting
+  src/middleware/
+    auth.js                session → request.user, requireAuth
+    requireDatabase.js     503 rather than a confusing failure
   src/models/              User, Habit, HabitCompletion, Challenge, Reward, Achievement, ReminderLog
   src/services/
+    sessionService.js      signed session tokens, no dependency
+    habitMapper.js         scheduledDays ↔ customDays, and the response shapes
     emailService.js        template rendering + the only SMTP code
     reminderService.js     pending computation, duplicate guard, the job
     googleHealthService.js Google Health integration boundary
   src/jobs/reminderScheduler.js   the polling scheduler
-  src/routes/              habits, rewards, challenge, reminders
-  src/server.js            Express API
+  src/routes/              auth, sync, habits, completions, rewards, achievements,
+                           challenge, analytics, reminders
 ```
+
+### API
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/api/health` | Public. Database and configuration status |
+| `GET` | `/api/auth/providers` | Public. Which sign-in options exist |
+| `GET` | `/api/auth/google` | Public. Redirects to Google |
+| `GET` | `/api/auth/google/callback` | Public. Exchanges the code, sets the session |
+| `POST` | `/api/auth/dev` | Development only. Creates a real local account |
+| `POST` | `/api/auth/logout` | Clears the session |
+| `GET` | `/api/me` | The signed-in user |
+| `GET` | `/api/bootstrap` | Everything the client needs in one call |
+| `POST` | `/api/sync` | Idempotent whole-account upsert (import + ongoing writes) |
+| `GET/POST` | `/api/habits` | List, create |
+| `PUT`/`DELETE` | `/api/habits/:id` | Update, permanent delete |
+| `POST` | `/api/habits/:id/archive` · `/restore` | Soft delete and undo |
+| `GET/POST` | `/api/completions` | List, add (idempotent) |
+| `DELETE` | `/api/completions/:habitId/:date` | Remove |
+| `GET/POST` | `/api/rewards` · `PUT`/`DELETE` `/api/rewards/:id` · `POST /:id/claim` | Reward ledger |
+| `GET/POST` | `/api/achievements` | Idempotent by milestone |
+| `GET`/`PUT` | `/api/challenge` | Start date and duration; progress is derived |
+| `GET` | `/api/analytics` | `?range=7d\|30d\|month\|all`, computed with the shared module |
+| `GET` | `/api/reminders/status` | Public. Whether email is configured |
+| `POST` | `/api/reminders/preview` | Public. Renders the email from a snapshot, sends nothing |
+| `POST` | `/api/reminders/test` | Guarded. Sends one real reminder |
+| `POST` | `/api/reminders/run` | Guarded. Runs the job now |
+
+Every data route is mounted behind `requireAuth` and `requireDatabase` in one place, and each scopes its own queries by `request.user._id`. No route accepts a `userId`.
 
 ---
 
@@ -460,31 +516,38 @@ best streak = 3      the missed Thursday breaks the run
 | Signed out after every restart | `SESSION_SECRET` is unset, so a throwaway secret is generated per boot. Set it in `.env`. |
 | "Changes are not being saved to your account" | The bootstrap load failed, so syncing is deliberately disabled rather than risk overwriting the account. Reload to retry. |
 | A signed-in user sees local data instead of their account | That is the failed-load state above; the app shows local data but will not write it to the account. |
-| Server logs "MongoDB unavailable" | `MONGODB_URI` is not set. This is expected and harmless; the frontend does not use the API. |
+| Server logs "MongoDB unavailable" | `MONGODB_URI` is missing or unreachable. The API still serves `/api/health`, and the frontend falls back to local storage. |
 
 ---
 
 ## Known Limitations
 
-- **No account system.** One local profile per browser, no sync across devices.
-- **localStorage only.** Clearing site data deletes everything.
-- **The Express API is a boundary, not a deployment.** Habits, completions, rewards, challenge and achievements all have real routes, validation and models, but the server has never been run against a live MongoDB Atlas cluster. Data routes require a verified user, and Google OAuth is not implemented, so they answer `401` — the truthful state of this build. The frontend does not call them.
-- **Google Health is not implemented.** The Settings panel reports "Not connected" truthfully. Steps, distance, calories and exercise are not fetched. Google OAuth is not wired up.
-- **Sign-in works; Google sign-in is unverified.** The full OAuth flow (state cookie, code exchange, profile fetch, user upsert, session issue) is implemented, and the parts that can be tested without Google are. No Google credentials exist in this environment, so the round trip to Google itself has never been made from here. Sign-in is fully exercisable via the developer route on a local database.
-- **Email delivery is unverified.** Everything up to and including the SMTP connection is tested; no email has reached a real inbox from this environment because no SMTP credentials exist here.
-- **Browser notifications only work while the app is open.** There is no push server and no service worker, so a notification cannot be delivered to a closed tab or a locked phone. The Settings panel says this plainly instead of implying background reminders work. The in-app reminder panel and the Home card need no permission and always work.
-- **Per-user timezone scheduling is not implemented.** One server-wide `REMINDER_TIMEZONE` is used by the job, with the trade-off explained in `REASONING.md`. The `User` model carries a `timezone` field, and the job already prefers it when set, so the account layer can populate it without a migration.
-- **The email is sent by SMTP only.** The provider is isolated to one function, so a transactional API (Resend, Postmark, SES) is a small change, but only the SMTP path exists today.
-- **Sync replaces rather than merges.** `POST /api/sync` upserts the whole account from the client's state and removes habits the client no longer has. That is safe for one device at a time, but two devices editing the same account concurrently would have the last writer win. A per-entity merge protocol is the natural next step.
-- **The integration tests need a downloadable mongod.** `tests/api.integration.test.js` uses `mongodb-memory-server`, which fetches a real `mongod` binary on first run. Without network access that suite cannot start.
-- **The scheduled email job needs accounts.** It iterates users in MongoDB, and this build has no sign-in yet, so in practice it has nothing to iterate. Everything downstream of that — the pending computation, the template, the duplicate guard, the retry-on-failure behaviour — is implemented and tested, and the same pipeline is fully demonstrable through `/api/reminders/preview` and `/test`, which take the browser's own habits. Wiring the job to real users is a matter of populating `request.user`, not of writing new reminder code.
-- **Per-user timezone scheduling is not implemented.** One server-wide `REMINDER_TIMEZONE` is used, with the trade-off explained in `REASONING.md`. The `User` model already carries a `timezone` field for when the account layer lands.
-- **The email is sent by SMTP only.** The provider is isolated to one function, so a transactional API (Resend, Postmark, SES) is a small change, but only the SMTP path exists today.
+**Verified working.** Sign-in, sessions, the account data model, per-user isolation, habit and completion persistence, rewards, achievements, derived challenge progress, the reminder job reading from the database, and the import of browser-local data have all been exercised end to end against a real MongoDB over real HTTP, and the signed-in flow has been driven in a real browser.
+
+**Not verified, because the credentials or services are not available here.**
+
+- **Google sign-in.** The full flow is implemented — state cookie, code exchange, profile fetch, upsert by email, session issue — and everything around it is tested. The round trip to Google itself has never been made from this environment. Sign-in is fully exercisable through the developer route on a local database.
+- **Email delivery.** Everything up to and including the SMTP connection is tested, including a real send against an unreachable host. No email has reached a real inbox from here.
+- **A live MongoDB Atlas cluster.** The integration suite uses a real `mongod`, but one started locally by `mongodb-memory-server`, not an Atlas deployment.
+
+**Deliberate scope limits.**
+
+- **Sync replaces rather than merges.** `POST /api/sync` upserts the whole account from the client's state and removes habits the client no longer has. Safe for one device at a time; two devices editing concurrently would have the last writer win. A per-entity merge protocol is the natural next step.
+- **Per-user timezone scheduling.** One server-wide `REMINDER_TIMEZONE` drives the job. The `User` model carries a `timezone` field and the job already prefers it when set, so the account layer can populate it without a migration.
+- **Browser notifications only fire while the app is open.** There is no push server and no service worker, so a notification cannot reach a closed tab or a locked phone. The Settings panel says so rather than implying otherwise. The in-app reminder panel and the Home card need no permission and always work.
+- **Email goes out over SMTP only.** The provider is isolated to a single function, so a transactional API (Resend, Postmark, SES) is a small change, but only the SMTP path exists today.
+- **Google Health is not implemented.** The Settings panel reports "Not connected" truthfully; steps, distance, calories and exercise are not fetched.
+- **No account deletion or export.** There is no self-service way to remove an account or take your data out.
 - **Theme covers the app's own surfaces.** Light and dark are both real, driven by CSS custom properties; it is not a full design-system theming layer.
-- **The unit suite covers logic, not rendering.** `npm test` exercises the pure modules (streaks, reminders, storage) thoroughly, but there is no component or end-to-end test framework, so UI behaviour is verified manually.
+
+**Operational.**
+
+- **`localStorage` is still the store when signed out.** That is intentional — the app must work with no backend — but it means clearing site data loses anything not yet imported into an account.
+- **The integration suite needs network access on first run.** `tests/api.integration.test.js` fetches a real `mongod` binary. Without it, that one file cannot start; the other 133 tests are unaffected.
+- **No component or end-to-end test framework.** The unit and integration suites cover logic and the API thoroughly, but UI behaviour is verified by scripted browser checks rather than a component test runner.
 
 ---
 
 ## Future Improvements
 
-A component or end-to-end test layer on top of the existing unit suite, an editable challenge duration, import/export of local data, real background reminders (which need a push server), Google OAuth and the Google Health sync, and a MongoDB-backed multi-device mode behind the existing API boundary.
+Account deletion and data export, a per-entity merge protocol so two devices can edit one account safely, per-user timezones from the account's own setting, real background reminders (which need a push server and a service worker), an editable challenge duration, and the Google Health sync behind the existing service boundary.
